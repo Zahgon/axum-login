@@ -8,3 +8,4 @@ coverage/
 
 **/*.db-shm
 **/*.db-wal
+*extras

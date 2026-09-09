@@ -1,10 +1,11 @@
 use std::{collections::HashMap, future::Future};
 
-use axum::{
-    body::Body,
-    extract::{OriginalUri, Request},
-    http::{HeaderName, HeaderValue, Response, StatusCode},
-    response::IntoResponse,
+use actix_web::{
+    http::{
+        header::{self, HeaderName, HeaderValue},
+        StatusCode,
+    },
+    HttpRequest, HttpResponse, Responder,
 };
 use tracing::error;
 
@@ -14,21 +15,24 @@ const DEFAULT_LOGIN_URL: &str = "/signin";
 const DEFAULT_REDIRECT_FIELD: &str = "next";
 
 /// Trait for [`super::Require`] middleware handlers.
-pub trait ResponseHandler<Req>: Send + Sync {
+///
+/// Handlers are shared across requests, so they must be `Send + Sync`. The
+/// futures they return are tied to the worker thread handling the request and
+/// therefore need not be.
+pub trait ResponseHandler: Send + Sync {
     /// Handle a request.
-    fn handle(&self, request: Request<Req>) -> BoxFuture<'static, Response<Body>>;
+    fn handle(&self, request: HttpRequest) -> BoxFuture<'static, HttpResponse>;
 }
 
-impl<F, ReqInBody, Fut, Res> ResponseHandler<ReqInBody> for F
+impl<F, Fut, Res> ResponseHandler for F
 where
-    F: Fn(Request<ReqInBody>) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Res> + Send + 'static,
-    Res: IntoResponse + 'static,
-    ReqInBody: Send + 'static,
+    F: Fn(HttpRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Res> + 'static,
+    Res: Responder + 'static,
 {
-    fn handle(&self, request: Request<ReqInBody>) -> BoxFuture<'static, Response<Body>> {
-        let fut = (self)(request);
-        Box::pin(async move { fut.await.into_response() })
+    fn handle(&self, request: HttpRequest) -> BoxFuture<'static, HttpResponse> {
+        let fut = (self)(request.clone());
+        Box::pin(async move { fut.await.respond_to(&request).map_into_boxed_body() })
     }
 }
 
@@ -36,14 +40,9 @@ where
 #[derive(Clone, Debug)]
 pub struct DefaultUnauthenticated;
 
-impl<ReqInBody> ResponseHandler<ReqInBody> for DefaultUnauthenticated {
-    fn handle(&self, _request: Request<ReqInBody>) -> BoxFuture<'static, Response<Body>> {
-        Box::pin(async move {
-            Response::builder()
-                .status(StatusCode::UNAUTHORIZED)
-                .body(Body::from("Unauthorized"))
-                .unwrap()
-        })
+impl ResponseHandler for DefaultUnauthenticated {
+    fn handle(&self, _request: HttpRequest) -> BoxFuture<'static, HttpResponse> {
+        Box::pin(async move { HttpResponse::build(StatusCode::UNAUTHORIZED).body("Unauthorized") })
     }
 }
 
@@ -51,27 +50,19 @@ impl<ReqInBody> ResponseHandler<ReqInBody> for DefaultUnauthenticated {
 #[derive(Clone, Debug)]
 pub struct DefaultUnauthorized;
 
-impl<ReqInBody> ResponseHandler<ReqInBody> for DefaultUnauthorized {
-    fn handle(&self, _request: Request<ReqInBody>) -> BoxFuture<'static, Response<Body>> {
-        Box::pin(async move {
-            Response::builder()
-                .status(StatusCode::FORBIDDEN)
-                .body(Body::from("Forbidden"))
-                .unwrap()
-        })
+impl ResponseHandler for DefaultUnauthorized {
+    fn handle(&self, _request: HttpRequest) -> BoxFuture<'static, HttpResponse> {
+        Box::pin(async move { HttpResponse::build(StatusCode::FORBIDDEN).body("Forbidden") })
     }
 }
 
 #[derive(Clone)]
 pub(super) struct InternalErrorFallback;
 
-impl<ReqInBody> ResponseHandler<ReqInBody> for InternalErrorFallback {
-    fn handle(&self, _request: Request<ReqInBody>) -> BoxFuture<'static, Response<Body>> {
+impl ResponseHandler for InternalErrorFallback {
+    fn handle(&self, _request: HttpRequest) -> BoxFuture<'static, HttpResponse> {
         Box::pin(async move {
-            Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from("Internal server error"))
-                .unwrap()
+            HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR).body("Internal server error")
         })
     }
 }
@@ -82,7 +73,7 @@ impl<ReqInBody> ResponseHandler<ReqInBody> for InternalErrorFallback {
 /// # Example
 ///
 /// ```rust,no_run
-/// use axum_login::{
+/// use actix_login::{
 ///     require::{RedirectHandler, Require},
 ///     AuthUser, AuthnBackend, UserId,
 /// };
@@ -163,11 +154,8 @@ impl RedirectHandler {
     }
 }
 
-impl<ReqInBody> ResponseHandler<ReqInBody> for RedirectHandler
-where
-    ReqInBody: Send + 'static,
-{
-    fn handle(&self, req: Request<ReqInBody>) -> BoxFuture<'static, Response<Body>> {
+impl ResponseHandler for RedirectHandler {
+    fn handle(&self, req: HttpRequest) -> BoxFuture<'static, HttpResponse> {
         let login_url = self
             .login_url
             .clone()
@@ -178,24 +166,18 @@ where
             .unwrap_or(DEFAULT_REDIRECT_FIELD.to_string());
 
         Box::pin(async move {
-            let original_uri = req
-                .extensions()
-                .get::<OriginalUri>()
-                .map(|uri| uri.0.clone())
-                .unwrap_or_else(|| req.uri().clone());
+            // Actix Web never rewrites the request URI when routing through
+            // scopes, so this is always the URI the user agent asked for.
+            let original_uri = req.uri().clone();
 
             match crate::url_with_redirect_query(&login_url, &redirect_field, original_uri) {
-                Ok(url) => axum::response::Response::builder()
-                    .status(StatusCode::TEMPORARY_REDIRECT)
-                    .header("Location", url.to_string())
-                    .body("Redirecting...".into())
-                    .unwrap(),
+                Ok(url) => HttpResponse::build(StatusCode::TEMPORARY_REDIRECT)
+                    .insert_header((header::LOCATION, url.to_string()))
+                    .body("Redirecting..."),
                 Err(err) => {
                     error!(err = %err);
-                    axum::response::Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body("Internal Server Error".into())
-                        .unwrap()
+                    HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body("Internal Server Error")
                 }
             }
         })
@@ -209,11 +191,11 @@ where
 /// # Example
 ///
 /// ```rust,no_run
-/// use axum::http::StatusCode;
-/// use axum_login::{
+/// use actix_login::{
 ///     require::{Require, SimpleResponseHandler},
 ///     AuthUser, AuthnBackend, UserId,
 /// };
+/// use actix_web::http::StatusCode;
 ///
 /// #[derive(Clone, Debug)]
 /// struct User;
@@ -372,28 +354,22 @@ impl SimpleResponseHandler {
     }
 }
 
-impl<ReqBody> ResponseHandler<ReqBody> for SimpleResponseHandler {
-    fn handle(&self, _req: Request<ReqBody>) -> BoxFuture<'static, Response<Body>> {
+impl ResponseHandler for SimpleResponseHandler {
+    fn handle(&self, _req: HttpRequest) -> BoxFuture<'static, HttpResponse> {
         let status_code = self.status_code;
         let body = self.body.clone();
         let content_type = self.content_type.clone();
         let headers = self.headers.clone();
 
         Box::pin(async move {
-            let mut response_builder = Response::builder().status(status_code);
+            let mut response = HttpResponse::build(status_code).body(body);
 
-            // Set content type
+            // Set content type, skipping it when it isn't a valid header value.
             if let Ok(content_type) = HeaderValue::from_str(&content_type) {
-                response_builder = response_builder.header("Content-Type", content_type);
+                response
+                    .headers_mut()
+                    .insert(header::CONTENT_TYPE, content_type);
             }
-
-            // Build the response
-            let mut response = response_builder.body(body.into()).unwrap_or_else(|_| {
-                Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(Body::from("Internal Server Error"))
-                    .unwrap()
-            });
 
             for (name, value) in &headers {
                 if let (Ok(header_name), Ok(header_value)) = (
@@ -411,55 +387,47 @@ impl<ReqBody> ResponseHandler<ReqBody> for SimpleResponseHandler {
 
 #[cfg(test)]
 mod tests {
-    use axum::{
-        extract::OriginalUri,
-        http::{header, Request, Uri},
-    };
+    use actix_web::test::TestRequest;
 
     use super::*;
 
-    #[tokio::test]
+    #[actix_web::test]
     async fn test_default_response() {
         let handler = SimpleResponseHandler::new();
-        let request = Request::builder().body(()).unwrap();
+        let request = TestRequest::default().to_http_request();
 
         let response = handler.handle(request).await;
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
-    #[tokio::test]
+    #[actix_web::test]
     async fn test_custom_headers() {
         let handler = SimpleResponseHandler::new().header("X-Custom-Header", "custom-value");
 
-        let request = Request::builder().body(()).unwrap();
+        let request = TestRequest::default().to_http_request();
         let response = handler.handle(request).await;
 
         assert_eq!(
             response.headers().get("X-Custom-Header").unwrap(),
             "custom-value"
         );
-        // assert!(response
-        //     .headers()
-        //     .contains_key("Access-Control-Allow-Origin"));
     }
 
-    #[tokio::test]
+    #[actix_web::test]
     async fn test_redirect_handler_invalid_login_url() {
         let handler = RedirectHandler::new().login_url("http://[::1");
-        let request = Request::builder().uri("/").body(()).unwrap();
+        let request = TestRequest::with_uri("/").to_http_request();
 
         let response = handler.handle(request).await;
 
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    #[tokio::test]
-    async fn test_redirect_handler_uses_original_uri() {
+    #[actix_web::test]
+    async fn test_redirect_handler_uses_request_uri() {
         let handler = RedirectHandler::new().login_url("/login");
-        let mut request = Request::builder().uri("/ignored").body(()).unwrap();
-        let original_uri = "/return".parse::<Uri>().unwrap();
-        request.extensions_mut().insert(OriginalUri(original_uri));
+        let request = TestRequest::with_uri("/return").to_http_request();
 
         let response = handler.handle(request).await;
 
@@ -470,10 +438,10 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[actix_web::test]
     async fn test_redirect_handler_defaults() {
         let handler = RedirectHandler::new();
-        let request = Request::builder().uri("/").body(()).unwrap();
+        let request = TestRequest::with_uri("/").to_http_request();
 
         let response = handler.handle(request).await;
 
@@ -484,10 +452,10 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[actix_web::test]
     async fn test_redirect_handler_preserves_existing_redirect_param() {
         let handler = RedirectHandler::new().login_url("/login?next=%2Fkeep");
-        let request = Request::builder().uri("/").body(()).unwrap();
+        let request = TestRequest::with_uri("/").to_http_request();
 
         let response = handler.handle(request).await;
 
@@ -498,24 +466,24 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[actix_web::test]
     async fn test_response_handler_from_closure() {
-        let handler = |_: Request<()>| async { StatusCode::IM_A_TEAPOT };
-        let request = Request::builder().body(()).unwrap();
+        let handler = |_: HttpRequest| async { HttpResponse::ImATeapot().finish() };
+        let request = TestRequest::default().to_http_request();
 
         let response = handler.handle(request).await;
 
         assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
     }
 
-    #[tokio::test]
+    #[actix_web::test]
     async fn test_simple_response_handler_invalid_headers_ignored() {
         let handler = SimpleResponseHandler::new()
             .content_type("\n")
             .header("bad header", "value")
             .header("X-Good", "ok");
 
-        let request = Request::builder().body(()).unwrap();
+        let request = TestRequest::default().to_http_request();
         let response = handler.handle(request).await;
 
         assert!(response.headers().get(header::CONTENT_TYPE).is_none());
@@ -523,11 +491,11 @@ mod tests {
         assert_eq!(response.headers().get("X-Good").unwrap(), "ok");
     }
 
-    #[tokio::test]
+    #[actix_web::test]
     async fn test_simple_response_handler_error_page() {
         let handler =
             SimpleResponseHandler::error_page(StatusCode::UNAUTHORIZED, "Denied", "No access");
-        let request = Request::builder().body(()).unwrap();
+        let request = TestRequest::default().to_http_request();
         let response = handler.handle(request).await;
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);

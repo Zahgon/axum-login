@@ -1,10 +1,5 @@
+use actix_web::{web, HttpResponse, Resource, Responder};
 use askama::Template;
-use axum::{
-    http::StatusCode,
-    response::{Html, IntoResponse},
-    routing::get,
-    Router,
-};
 
 use crate::users::AuthSession;
 
@@ -14,25 +9,28 @@ struct ProtectedTemplate<'a> {
     username: &'a str,
 }
 
-pub fn router() -> Router<()> {
-    Router::new().route("/", get(self::get::protected))
+pub fn resource() -> Resource {
+    web::resource("/")
+        .route(web::get().to(self::get::protected))
+        .route(web::head().to(self::get::protected))
 }
 
 mod get {
     use super::*;
 
-    pub async fn protected(auth_session: AuthSession) -> impl IntoResponse {
+    pub async fn protected(auth_session: AuthSession) -> impl Responder {
         match auth_session.user().await {
-            Some(user) => Html(
-                ProtectedTemplate {
-                    username: &user.username,
-                }
-                .render()
-                .unwrap(),
-            )
-            .into_response(),
+            Some(user) => HttpResponse::Ok()
+                .content_type("text/html; charset=utf-8")
+                .body(
+                    ProtectedTemplate {
+                        username: &user.username,
+                    }
+                    .render()
+                    .unwrap(),
+                ),
 
-            None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            None => HttpResponse::InternalServerError().finish(),
         }
     }
 }

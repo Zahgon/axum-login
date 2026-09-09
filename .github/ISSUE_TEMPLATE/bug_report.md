@@ -16,7 +16,7 @@ Please fill in as much of the template below as you're able.
 ### Version
 
 <!--
-List the version of `axum-login` you are using.
+List the version of `actix-login` you are using.
 -->
 
 ### Platform
@@ -28,7 +28,7 @@ Output of `uname -a` (UNIX), or version and 32 or 64-bit (Windows)
 ### Crates
 
 <!--
-If known, please specify the related tower-sessions crates. Otherwise, delete this
+If known, please specify the related actix-session crates. Otherwise, delete this
 section.
 -->
 

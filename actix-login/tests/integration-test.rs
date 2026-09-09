@@ -9,7 +9,7 @@ use std::{
 
 use reqwest::{
     cookie::{CookieStore, Jar},
-    Client, StatusCode, Url,
+    header, redirect, Client, StatusCode, Url,
 };
 use serial_test::serial;
 
@@ -75,7 +75,8 @@ async fn permissions_example() {
         .build()
         .unwrap();
 
-    // A logged out user is redirected to the login URL with a next query string.
+    // A logged out user is redirected to the login URL with a next query
+    // string.
     let res = client.get(url("/")).send().await.unwrap();
 
     assert_eq!(*res.url(), url("/login?next=%2F"));
@@ -126,6 +127,17 @@ async fn permissions_example() {
     let res = client.get(url("/restricted")).send().await.unwrap();
     assert_eq!(*res.url(), url("/restricted"));
     assert_eq!(res.status(), StatusCode::OK);
+    assert!(
+        res.headers().get(header::SET_COOKIE).is_none(),
+        "Reading a page should not re-issue the session cookie"
+    );
+
+    let session_cookie = cookie_jar
+        .cookies(&url("/"))
+        .expect("A cookie should be set")
+        .to_str()
+        .unwrap()
+        .to_owned();
 
     // Log out and check the cookie has been removed in response.
     let res = client.get(url("/logout")).send().await.unwrap();
@@ -136,6 +148,48 @@ async fn permissions_example() {
         0,
         "Expected 'id' cookie to be removed"
     );
+
+    // A client which keeps the cookie from before the logout is still logged
+    // out: the session is destroyed in the store, not just in the browser.
+    let plain_client = Client::builder()
+        .redirect(redirect::Policy::none())
+        .build()
+        .unwrap();
+    let res = plain_client
+        .get(url("/restricted"))
+        .header(header::COOKIE, session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
+
+    // A form body which is missing a required field is unprocessable.
+    let res = plain_client
+        .post(url("/login"))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body("username=ferris")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // A form body without a content type is unsupported.
+    let res = plain_client
+        .post(url("/login"))
+        .body("username=ferris&password=hunter42")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+    // HEAD is answered wherever GET is, with the body dropped.
+    let res = plain_client.head(url("/login")).send().await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(
+        res.headers().contains_key(header::CONTENT_LENGTH),
+        "HEAD should report the length GET would have sent"
+    );
+    assert!(res.bytes().await.unwrap().is_empty(), "HEAD has no body");
 }
 
 struct ChildGuard {

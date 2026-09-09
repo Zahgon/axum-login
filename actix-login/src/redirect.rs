@@ -1,6 +1,6 @@
-use axum::http::{self, Uri};
+use actix_web::{error::HttpError, http::Uri};
 
-fn update_query(uri: &Uri, new_query: String) -> Result<Uri, http::Error> {
+fn update_query(uri: &Uri, new_query: String) -> Result<Uri, HttpError> {
     let query = form_urlencoded::parse(uri.query().map(|q| q.as_bytes()).unwrap_or_default());
     let updated_query = form_urlencoded::Serializer::new(new_query)
         .extend_pairs(query)
@@ -19,7 +19,7 @@ pub fn url_with_redirect_query(
     url: &str,
     redirect_field: &str,
     redirect_uri: Uri,
-) -> Result<Uri, http::Error> {
+) -> Result<Uri, HttpError> {
     let uri = url.parse::<Uri>()?;
 
     if let Some(query) = uri.query() {

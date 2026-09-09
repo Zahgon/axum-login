@@ -1,12 +1,6 @@
+use actix_web::{http::header, web, HttpResponse, Responder};
+use actix_web_flash_messages::{FlashMessage, IncomingFlashMessages};
 use askama::Template;
-use axum::{
-    extract::Query,
-    http::StatusCode,
-    response::{Html, IntoResponse, Redirect},
-    routing::{get, post},
-    Form, Router,
-};
-use axum_messages::{Message, Messages};
 use serde::Deserialize;
 
 use crate::users::{AuthSession, Credentials};
@@ -14,7 +8,7 @@ use crate::users::{AuthSession, Credentials};
 #[derive(Template)]
 #[template(path = "login.html")]
 pub struct LoginTemplate {
-    messages: Vec<Message>,
+    messages: Vec<String>,
     next: Option<String>,
 }
 
@@ -25,48 +19,58 @@ pub struct NextUrl {
     next: Option<String>,
 }
 
-pub fn router() -> Router<()> {
-    Router::new()
-        .route("/login", post(self::post::login))
-        .route("/login", get(self::get::login))
-        .route("/logout", get(self::get::logout))
+pub fn configure(cfg: &mut web::ServiceConfig) {
+    cfg.service(
+        web::resource("/login")
+            .route(web::post().to(self::post::login))
+            .route(web::get().to(self::get::login))
+            .route(web::head().to(self::get::login)),
+    )
+    .service(
+        web::resource("/logout")
+            .route(web::get().to(self::get::logout))
+            .route(web::head().to(self::get::logout)),
+    );
+}
+
+fn redirect_to(location: &str) -> HttpResponse {
+    HttpResponse::SeeOther()
+        .insert_header((header::LOCATION, location.to_owned()))
+        .finish()
 }
 
 mod post {
     use super::*;
 
-    pub async fn login(
-        auth_session: AuthSession,
-        messages: Messages,
-        Form(creds): Form<Credentials>,
-    ) -> impl IntoResponse {
+    pub async fn login(auth_session: AuthSession, creds: web::Form<Credentials>) -> impl Responder {
+        let creds = creds.into_inner();
+
         let user = match auth_session.authenticate(creds.clone()).await {
             Ok(Some(user)) => user,
             Ok(None) => {
-                messages.error("Invalid credentials");
+                FlashMessage::error("Invalid credentials").send();
 
                 let mut login_url = "/login".to_string();
                 if let Some(next) = creds.next {
                     login_url = format!("{login_url}?next={next}");
                 };
 
-                return Redirect::to(&login_url).into_response();
+                return redirect_to(&login_url);
             }
-            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            Err(_) => return HttpResponse::InternalServerError().finish(),
         };
 
         if auth_session.login(&user).await.is_err() {
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            return HttpResponse::InternalServerError().finish();
         }
 
-        messages.success(format!("Successfully logged in as {}", user.username));
+        FlashMessage::success(format!("Successfully logged in as {}", user.username)).send();
 
         if let Some(ref next) = creds.next {
-            Redirect::to(next)
+            redirect_to(next)
         } else {
-            Redirect::to("/")
+            redirect_to("/")
         }
-        .into_response()
     }
 }
 
@@ -74,23 +78,28 @@ mod get {
     use super::*;
 
     pub async fn login(
-        messages: Messages,
-        Query(NextUrl { next }): Query<NextUrl>,
-    ) -> Html<String> {
-        Html(
-            LoginTemplate {
-                messages: messages.into_iter().collect(),
-                next,
-            }
-            .render()
-            .unwrap(),
-        )
+        messages: IncomingFlashMessages,
+        next: web::Query<NextUrl>,
+    ) -> impl Responder {
+        let body = LoginTemplate {
+            messages: messages
+                .iter()
+                .map(|message| message.content().to_string())
+                .collect(),
+            next: next.into_inner().next,
+        }
+        .render()
+        .unwrap();
+
+        HttpResponse::Ok()
+            .content_type("text/html; charset=utf-8")
+            .body(body)
     }
 
-    pub async fn logout(auth_session: AuthSession) -> impl IntoResponse {
+    pub async fn logout(auth_session: AuthSession) -> impl Responder {
         match auth_session.logout().await {
-            Ok(_) => Redirect::to("/login").into_response(),
-            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            Ok(_) => redirect_to("/login"),
+            Err(_) => HttpResponse::InternalServerError().finish(),
         }
     }
 }

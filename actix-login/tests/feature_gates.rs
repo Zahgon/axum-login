@@ -1,6 +1,6 @@
 #[cfg(all(feature = "require-builder", not(feature = "macros-middleware")))]
 mod require_builder_only {
-    use axum_login::require::{RedirectHandler, Require};
+    use actix_login::require::{RedirectHandler, Require};
 
     #[test]
     fn assert_builder_api_available() {
@@ -29,7 +29,7 @@ mod require_builder_only {
 
     impl std::error::Error for Error {}
 
-    impl axum_login::AuthUser for User {
+    impl actix_login::AuthUser for User {
         type Id = i64;
 
         fn id(&self) -> Self::Id {
@@ -41,7 +41,7 @@ mod require_builder_only {
         }
     }
 
-    impl axum_login::AuthnBackend for TestBackend {
+    impl actix_login::AuthnBackend for TestBackend {
         type User = User;
         type Credentials = Credentials;
         type Error = Error;
@@ -55,7 +55,7 @@ mod require_builder_only {
 
         async fn get_user(
             &self,
-            _: &<<Self as axum_login::AuthnBackend>::User as axum_login::AuthUser>::Id,
+            _: &<<Self as actix_login::AuthnBackend>::User as actix_login::AuthUser>::Id,
         ) -> Result<Option<Self::User>, Self::Error> {
             Ok(Some(User))
         }

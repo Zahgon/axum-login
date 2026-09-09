@@ -1,5 +1,5 @@
+use actix_web::{web, HttpResponse, Resource, Responder};
 use askama::Template;
-use axum::{http::StatusCode, response::IntoResponse, routing::get, Router};
 
 use crate::users::AuthSession;
 
@@ -9,27 +9,28 @@ struct RestrictedTemplate<'a> {
     username: &'a str,
 }
 
-pub fn router() -> Router<()> {
-    Router::new().route("/restricted", get(self::get::restricted))
+pub fn resource() -> Resource {
+    web::resource("/restricted")
+        .route(web::get().to(self::get::restricted))
+        .route(web::head().to(self::get::restricted))
 }
 
 mod get {
-    use axum::response::Html;
-
     use super::*;
 
-    pub async fn restricted(auth_session: AuthSession) -> impl IntoResponse {
+    pub async fn restricted(auth_session: AuthSession) -> impl Responder {
         match auth_session.user().await {
-            Some(user) => Html(
-                RestrictedTemplate {
-                    username: &user.username,
-                }
-                .render()
-                .unwrap(),
-            )
-            .into_response(),
+            Some(user) => HttpResponse::Ok()
+                .content_type("text/html; charset=utf-8")
+                .body(
+                    RestrictedTemplate {
+                        username: &user.username,
+                    }
+                    .render()
+                    .unwrap(),
+                ),
 
-            None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            None => HttpResponse::InternalServerError().finish(),
         }
     }
 }

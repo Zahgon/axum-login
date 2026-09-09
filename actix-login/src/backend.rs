@@ -15,7 +15,7 @@ pub type UserId<Backend> = <<Backend as AuthnBackend>::User as AuthUser>::Id;
 /// # Examples
 ///
 /// ```rust
-/// use axum_login::AuthUser;
+/// use actix_login::AuthUser;
 ///
 /// #[derive(Debug, Clone)]
 /// struct User {
@@ -67,7 +67,7 @@ pub trait AuthUser: Debug + Clone + Send + Sync {
 /// ```rust
 /// use std::collections::HashMap;
 ///
-/// use axum_login::{AuthUser, AuthnBackend, UserId};
+/// use actix_login::{AuthUser, AuthnBackend, UserId};
 ///
 /// #[derive(Debug, Clone)]
 /// struct User {

@@ -1,21 +1,32 @@
-use std::{fmt::Debug, sync::Arc};
+use std::{cell::RefCell, fmt::Debug, rc::Rc};
 
+use actix_session::{Session, SessionGetError, SessionInsertError};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
-use tokio::sync::Mutex;
-use tower_sessions::{session, Session};
 
 use crate::{
     backend::{AuthUser, UserId},
     AuthnBackend,
 };
 
+/// An error which can occur while reading from or writing to the session.
+#[derive(Debug, thiserror::Error)]
+pub enum SessionError {
+    /// A mapping to [`actix_session::SessionGetError`].
+    #[error(transparent)]
+    Get(#[from] SessionGetError),
+
+    /// A mapping to [`actix_session::SessionInsertError`].
+    #[error(transparent)]
+    Insert(#[from] SessionInsertError),
+}
+
 /// An error type which maps session and backend errors.
 #[derive(thiserror::Error)]
 pub enum Error<Backend: AuthnBackend> {
-    /// A mapping to `tower_sessions::session::Error'.
+    /// A mapping to [`SessionError`].
     #[error(transparent)]
-    Session(session::Error),
+    Session(SessionError),
 
     /// A mapping to `Backend::Error`.
     #[error(transparent)]
@@ -33,9 +44,21 @@ impl<Backend: AuthnBackend> Debug for Error<Backend> {
     }
 }
 
-impl<Backend: AuthnBackend> From<session::Error> for Error<Backend> {
-    fn from(value: session::Error) -> Self {
+impl<Backend: AuthnBackend> From<SessionError> for Error<Backend> {
+    fn from(value: SessionError) -> Self {
         Self::Session(value)
+    }
+}
+
+impl<Backend: AuthnBackend> From<SessionGetError> for Error<Backend> {
+    fn from(value: SessionGetError) -> Self {
+        Self::Session(SessionError::Get(value))
+    }
+}
+
+impl<Backend: AuthnBackend> From<SessionInsertError> for Error<Backend> {
+    fn from(value: SessionInsertError) -> Self {
+        Self::Session(SessionError::Insert(value))
     }
 }
 
@@ -54,12 +77,23 @@ impl<UserId: Clone> Default for Data<UserId> {
     }
 }
 
-#[derive(Debug, Clone)]
 struct Inner<Backend: AuthnBackend> {
     session: Session,
     user: Option<Backend::User>,
     data: Data<UserId<Backend>>,
     data_key: &'static str,
+}
+
+// `actix_session::Session` does not implement `Debug`, so we implement it
+// manually here and elide the session itself.
+impl<Backend: AuthnBackend> Debug for Inner<Backend> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Inner")
+            .field("user", &self.user)
+            .field("data", &self.data)
+            .field("data_key", &self.data_key)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A specialized session for identification, authentication, and authorization
@@ -80,10 +114,30 @@ struct Inner<Backend: AuthnBackend> {
 /// returned. In the case the credentials are invalid, no user will be returned.
 /// When we do have a user, it's then possible to set the state of the session
 /// so that the user is logged in.
-#[derive(Debug, Clone)]
+///
+/// Because the underlying [`actix_session::Session`] is bound to the worker
+/// thread that handles the request, this type is neither `Send` nor `Sync`.
+/// This matches the actor model Actix Web uses for request handling.
 pub struct AuthSession<Backend: AuthnBackend> {
     backend: Backend,
-    inner: Arc<Mutex<Inner<Backend>>>,
+    inner: Rc<RefCell<Inner<Backend>>>,
+}
+
+impl<Backend: AuthnBackend> Clone for AuthSession<Backend> {
+    fn clone(&self) -> Self {
+        Self {
+            backend: self.backend.clone(),
+            inner: Rc::clone(&self.inner),
+        }
+    }
+}
+
+impl<Backend: AuthnBackend> Debug for AuthSession<Backend> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthSession")
+            .field("inner", &self.inner)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<Backend: AuthnBackend> AuthSession<Backend> {
@@ -94,7 +148,7 @@ impl<Backend: AuthnBackend> AuthSession<Backend> {
 
     /// Returns the user that's authenicated to this session otherwise `None`.
     pub async fn user(&self) -> Option<Backend::User> {
-        self.inner.lock().await.user.clone()
+        self.inner.borrow().user.clone()
     }
 
     /// Verifies the provided credentials via the backend returning the
@@ -121,11 +175,11 @@ impl<Backend: AuthnBackend> AuthSession<Backend> {
     #[tracing::instrument(level = "debug", skip_all, fields(user.id = user.id().to_string()), ret, err)]
     pub async fn login(&self, user: &Backend::User) -> Result<(), Error<Backend>> {
         {
-            let mut inner = self.inner.lock().await;
+            let mut inner = self.inner.borrow_mut();
             inner.user = Some(user.clone());
 
             if inner.data.auth_hash.is_none() {
-                inner.session.cycle_id().await?; // Session-fixation mitigation.
+                inner.session.renew(); // Session-fixation mitigation.
             }
 
             inner.data.user_id = Some(user.id());
@@ -140,24 +194,24 @@ impl<Backend: AuthnBackend> AuthSession<Backend> {
     /// Updates the session such that the user is logged out.
     #[tracing::instrument(level = "debug", skip_all, fields(user.id), ret, err)]
     pub async fn logout(&self) -> Result<Option<Backend::User>, Error<Backend>> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.borrow_mut();
         let user = inner.user.take();
 
         if let Some(ref user) = user {
             tracing::Span::current().record("user.id", user.id().to_string());
         }
 
-        inner.session.flush().await?;
+        inner.session.purge();
 
         Ok(user)
     }
 
-    async fn update_session(&self) -> Result<(), session::Error> {
-        let inner = self.inner.lock().await;
+    async fn update_session(&self) -> Result<(), SessionError> {
+        let inner = self.inner.borrow();
         inner
             .session
             .insert(inner.data_key, inner.data.clone())
-            .await
+            .map_err(SessionError::Insert)
     }
 
     pub(crate) async fn from_session(
@@ -165,7 +219,10 @@ impl<Backend: AuthnBackend> AuthSession<Backend> {
         backend: Backend,
         data_key: &'static str,
     ) -> Result<Self, Error<Backend>> {
-        let mut data: Data<_> = session.get(data_key).await?.unwrap_or_default();
+        let mut data: Data<_> = session
+            .get(data_key)
+            .map_err(SessionError::Get)?
+            .unwrap_or_default();
 
         let mut user = if let Some(ref user_id) = data.user_id {
             backend.get_user(user_id).await.map_err(Error::Backend)?
@@ -182,11 +239,11 @@ impl<Backend: AuthnBackend> AuthSession<Backend> {
             if !session_verified {
                 user = None;
                 data = Data::default();
-                session.flush().await?;
+                session.purge();
             }
         }
 
-        let inner = Arc::new(Mutex::new(Inner {
+        let inner = Rc::new(RefCell::new(Inner {
             user,
             session,
             data,
@@ -199,10 +256,9 @@ impl<Backend: AuthnBackend> AuthSession<Backend> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
+    use actix_session::{SessionExt, SessionStatus};
+    use actix_web::test::TestRequest;
     use mockall::{predicate::*, *};
-    use tower_sessions::MemoryStore;
 
     use super::*;
 
@@ -257,7 +313,13 @@ mod tests {
 
     impl std::error::Error for MockError {}
 
-    #[tokio::test]
+    /// Builds a bare session, as `SessionMiddleware` would provide to a
+    /// request.
+    fn session() -> Session {
+        TestRequest::default().to_srv_request().get_session()
+    }
+
+    #[actix_web::test]
     async fn test_authenticate() {
         let mut mock_backend = MockBackend::default();
         let mock_user = MockUser {
@@ -272,18 +334,15 @@ mod tests {
             .times(1)
             .returning(move |_| Ok(Some(mock_user.clone())));
 
-        let store = Arc::new(MemoryStore::default());
-
-        let session = Session::new(None, store, None);
         let inner = Inner {
             user: None,
-            session,
+            session: session(),
             data: Data::default(),
             data_key: "auth_data",
         };
         let auth_session = AuthSession {
             backend: mock_backend,
-            inner: Arc::new(Mutex::new(inner)),
+            inner: Rc::new(RefCell::new(inner)),
         };
 
         let result = auth_session.authenticate(creds).await;
@@ -291,7 +350,7 @@ mod tests {
         assert!(result.unwrap().is_some());
     }
 
-    #[tokio::test]
+    #[actix_web::test]
     async fn test_authenticate_bad_credentials() {
         let mut mock_backend = MockBackend::default();
         let bad_creds = MockCredentials;
@@ -302,25 +361,22 @@ mod tests {
             .times(1)
             .returning(|_| Ok(None));
 
-        let store = Arc::new(MemoryStore::default());
-
-        let session = Session::new(None, store, None);
         let inner = Inner {
             user: None,
-            session,
+            session: session(),
             data: Data::default(),
             data_key: "auth_data",
         };
         let auth_session = AuthSession {
             backend: mock_backend,
-            inner: Arc::new(Mutex::new(inner)),
+            inner: Rc::new(RefCell::new(inner)),
         };
         let result = auth_session.authenticate(bad_creds).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
     }
 
-    #[tokio::test]
+    #[actix_web::test]
     async fn test_login() {
         let mock_backend = MockBackend::default();
         let mock_user = MockUser {
@@ -328,9 +384,7 @@ mod tests {
             auth_hash: Default::default(),
         };
 
-        let store = Arc::new(MemoryStore::default());
-        let session = Session::new(None, store, None);
-        let original_session_id = session.id();
+        let session = session();
         let inner = Inner {
             user: None,
             session: session.clone(),
@@ -339,24 +393,23 @@ mod tests {
         };
         let auth_session = AuthSession {
             backend: mock_backend,
-            inner: Arc::new(Mutex::new(inner)),
+            inner: Rc::new(RefCell::new(inner)),
         };
+
+        // We were provided a fresh, unmodified session initially.
+        assert_eq!(session.status(), SessionStatus::Unchanged);
 
         auth_session.login(&mock_user).await.unwrap();
         assert!(auth_session.user().await.is_some());
         assert_eq!(auth_session.user().await.unwrap().id(), 42);
 
-        // Simulate request persisting session.
-        session.save().await.unwrap();
-
-        // We were provided no session initially.
-        assert!(original_session_id.is_none());
-
-        // We have a session ID after saving.
-        assert!(session.id().is_some());
+        // Logging in cycles the session ID, so the session is marked renewed
+        // and the auth data is persisted to it.
+        assert_eq!(session.status(), SessionStatus::Renewed);
+        assert!(session.contains_key("auth_data"));
     }
 
-    #[tokio::test]
+    #[actix_web::test]
     async fn test_logout() {
         let mock_backend = MockBackend::default();
         let mock_user = MockUser {
@@ -364,25 +417,27 @@ mod tests {
             auth_hash: Default::default(),
         };
 
-        let store = Arc::new(MemoryStore::default());
-        let session = Session::new(None, store, None);
+        let session = session();
         let inner = Inner {
             user: Some(mock_user),
-            session,
+            session: session.clone(),
             data: Data::default(),
             data_key: "auth_data",
         };
         let auth_session = AuthSession {
             backend: mock_backend,
-            inner: Arc::new(Mutex::new(inner)),
+            inner: Rc::new(RefCell::new(inner)),
         };
         let logged_out_user = auth_session.logout().await.unwrap();
         assert!(logged_out_user.is_some());
         assert_eq!(logged_out_user.unwrap().id(), 42);
         assert!(auth_session.user().await.is_none());
+
+        // The session is purged, both client and server side.
+        assert_eq!(session.status(), SessionStatus::Purged);
     }
 
-    #[tokio::test]
+    #[actix_web::test]
     async fn test_from_session() {
         let mut mock_backend = MockBackend::default();
         let mock_user = MockUser {
@@ -396,8 +451,7 @@ mod tests {
             .times(1)
             .returning(move |_| Ok(Some(mock_user.clone())));
 
-        let store = Arc::new(MemoryStore::default());
-        let session = Session::new(None, store.clone(), None);
+        let session = session();
         let data_key = "auth_data";
 
         // Simulate a user being logged in
@@ -405,7 +459,7 @@ mod tests {
             user_id: Some(42),
             auth_hash: Some(vec![1, 2, 3, 4]),
         };
-        session.insert(data_key, &data).await.unwrap();
+        session.insert(data_key, &data).unwrap();
 
         let auth_session = AuthSession::from_session(session, mock_backend, data_key)
             .await
@@ -415,7 +469,7 @@ mod tests {
         assert_eq!(auth_session.user().await.unwrap().id(), 42);
     }
 
-    #[tokio::test]
+    #[actix_web::test]
     async fn test_from_session_bad_auth_hash() {
         let mut mock_backend = MockBackend::default();
         let mock_user = MockUser {
@@ -429,8 +483,7 @@ mod tests {
             .times(1)
             .returning(move |_| Ok(Some(mock_user.clone())));
 
-        let store = Arc::new(MemoryStore::default());
-        let session = Session::new(None, store.clone(), None);
+        let session = session();
         let data_key = "auth_data";
 
         // Try to use a malformed auth hash.
@@ -438,7 +491,7 @@ mod tests {
             user_id: Some(42),
             auth_hash: Some(vec![4, 3, 2, 1]),
         };
-        session.insert(data_key, &data).await.unwrap();
+        session.insert(data_key, &data).unwrap();
 
         let auth_session = AuthSession::from_session(session, mock_backend, data_key)
             .await

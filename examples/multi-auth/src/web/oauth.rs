@@ -1,18 +1,12 @@
+use actix_login::actix_session::Session;
+use actix_web::{web, HttpResponse, Responder};
 use askama::Template;
-use axum::{
-    extract::Query,
-    http::StatusCode,
-    response::{Html, IntoResponse, Redirect},
-    routing::get,
-    Router,
-};
-use axum_login::tower_sessions::Session;
 use oauth2::CsrfToken;
 use serde::Deserialize;
 
 use crate::{
     users::{AuthSession, Credentials},
-    web::auth::{LoginTemplate, NEXT_URL_KEY},
+    web::auth::{redirect_to, LoginTemplate, NEXT_URL_KEY},
 };
 
 pub const CSRF_STATE_KEY: &str = "oauth.csrf-state";
@@ -23,8 +17,12 @@ pub struct AuthzResp {
     state: CsrfToken,
 }
 
-pub fn router() -> Router<()> {
-    Router::new().route("/oauth/callback", get(self::get::callback))
+pub fn configure(cfg: &mut web::ServiceConfig) {
+    cfg.service(
+        web::resource("/oauth/callback")
+            .route(web::get().to(self::get::callback))
+            .route(web::head().to(self::get::callback)),
+    );
 }
 
 mod get {
@@ -34,13 +32,15 @@ mod get {
     pub async fn callback(
         auth_session: AuthSession,
         session: Session,
-        Query(AuthzResp {
+        query: web::Query<AuthzResp>,
+    ) -> impl Responder {
+        let AuthzResp {
             code,
             state: new_state,
-        }): Query<AuthzResp>,
-    ) -> impl IntoResponse {
-        let Ok(Some(old_state)) = session.get(CSRF_STATE_KEY).await else {
-            return StatusCode::BAD_REQUEST.into_response();
+        } = query.into_inner();
+
+        let Ok(Some(old_state)) = session.get(CSRF_STATE_KEY) else {
+            return HttpResponse::BadRequest().finish();
         };
 
         let creds = Credentials::OAuth(OAuthCreds {
@@ -52,30 +52,28 @@ mod get {
         let user = match auth_session.authenticate(creds).await {
             Ok(Some(user)) => user,
             Ok(None) => {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Html(
+                return HttpResponse::Unauthorized()
+                    .content_type("text/html; charset=utf-8")
+                    .body(
                         LoginTemplate {
                             message: Some("Invalid CSRF state.".to_string()),
                             next: None,
                         }
                         .render()
                         .unwrap(),
-                    ),
-                )
-                    .into_response()
+                    )
             }
-            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            Err(_) => return HttpResponse::InternalServerError().finish(),
         };
 
         if auth_session.login(&user).await.is_err() {
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            return HttpResponse::InternalServerError().finish();
         }
 
-        if let Ok(Some(next)) = session.remove::<String>(NEXT_URL_KEY).await {
-            Redirect::to(&next).into_response()
+        if let Some(Ok(next)) = session.remove_as::<String>(NEXT_URL_KEY) {
+            redirect_to(&next)
         } else {
-            Redirect::to("/").into_response()
+            redirect_to("/")
         }
     }
 }

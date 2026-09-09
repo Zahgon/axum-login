@@ -2,7 +2,7 @@
 //!
 //! This module provides the [`RequireBuilder`] type, a flexible and composable
 //! API for defining how authentication and authorization checks are performed
-//! in your Axum application.
+//! in your Actix Web application.
 //!
 //! The builder stores predicates and handlers behind `Arc` to keep the public
 //! type simple while still accepting concrete implementations.
@@ -41,7 +41,7 @@
 //! ## Example
 //!
 //! ```rust,no_run
-//! use axum_login::{
+//! use actix_login::{
 //!     require::{RedirectHandler, Require},
 //!     AuthUser, AuthnBackend, UserId,
 //! };
@@ -88,8 +88,6 @@
 
 use std::sync::Arc;
 
-use axum::body::Body;
-
 use crate::{
     require::{
         handler::{DefaultUnauthenticated, DefaultUnauthorized, ResponseHandler},
@@ -103,7 +101,7 @@ use crate::{
 /// authorization requirements.
 ///
 /// The `RequireBuilder` provides a fluent API for composing authentication
-/// logic in your Axum application. Each call to a method like
+/// logic in your Actix Web application. Each call to a method like
 /// [`decision`](#method.decision),
 /// [`unauthenticated`](#method.unauthenticated),
 /// or [`RequireBuilder::unauthorized`] returns a new builder with the specified
@@ -116,7 +114,7 @@ use crate::{
 /// # Example
 ///
 /// ```rust,no_run
-/// use axum_login::{
+/// use actix_login::{
 ///     require::{RedirectHandler, Require, RequireBuilder},
 ///     AuthUser, AuthnBackend, UserId,
 /// };
@@ -162,18 +160,18 @@ use crate::{
 /// # let _builder: RequireBuilder<Backend> = Require::builder();
 /// ```
 #[derive(Clone)]
-pub struct RequireBuilder<B, ST = (), T = Body> {
+pub struct RequireBuilder<B, ST = ()> {
     /// Decision predicate for the request.
     decision: Arc<dyn DecisionPredicate<B, ST>>,
     /// Handler for unauthorized users.
-    unauthorized: Arc<dyn ResponseHandler<T>>,
+    unauthorized: Arc<dyn ResponseHandler>,
     /// Handler for unauthenticated users.
-    unauthenticated: Arc<dyn ResponseHandler<T>>,
+    unauthenticated: Arc<dyn ResponseHandler>,
     /// Shared state available to predicates and handlers.
     state: Arc<ST>,
 }
 
-impl<B, ST, T> std::fmt::Debug for RequireBuilder<B, ST, T> {
+impl<B, ST> std::fmt::Debug for RequireBuilder<B, ST> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RequireBuilder")
             .field("decision", &"DecisionPredicate")
@@ -184,7 +182,7 @@ impl<B, ST, T> std::fmt::Debug for RequireBuilder<B, ST, T> {
     }
 }
 
-impl<B, T> Default for RequireBuilder<B, (), T>
+impl<B> Default for RequireBuilder<B, ()>
 where
     B: AuthnBackend + Send + Sync + 'static,
 {
@@ -193,7 +191,7 @@ where
     }
 }
 
-impl<B, T> RequireBuilder<B, (), T>
+impl<B> RequireBuilder<B, ()>
 where
     B: AuthnBackend + Send + Sync + 'static,
 {
@@ -214,7 +212,7 @@ where
     }
 }
 
-impl<B, ST, T> RequireBuilder<B, ST, T>
+impl<B, ST> RequireBuilder<B, ST>
 where
     B: AuthnBackend + Send + Sync + 'static,
     ST: Send + Sync + 'static,
@@ -230,7 +228,7 @@ where
     }
 }
 
-impl<B, ST, T> RequireBuilder<B, ST, T>
+impl<B, ST> RequireBuilder<B, ST>
 where
     B: AuthnBackend + Send + Sync + 'static,
     ST: Send + Sync + 'static,
@@ -261,7 +259,7 @@ where
     /// is logged in.
     pub fn unauthenticated<Uh2>(self, new_handler: Uh2) -> Self
     where
-        Uh2: ResponseHandler<T> + 'static,
+        Uh2: ResponseHandler + 'static,
     {
         Self {
             unauthenticated: Arc::new(new_handler),
@@ -275,7 +273,7 @@ where
     /// to access the requested resource.
     pub fn unauthorized<Un2>(self, new_handler: Un2) -> Self
     where
-        Un2: ResponseHandler<T> + 'static,
+        Un2: ResponseHandler + 'static,
     {
         Self {
             unauthorized: Arc::new(new_handler),
@@ -286,8 +284,8 @@ where
     /// Builds the final [`Require`] layer.
     ///
     /// This method consumes the builder and produces the middleware that can be
-    /// applied to an Axum `Router` or `Service`.
-    pub fn build(self) -> Require<B, ST, T> {
+    /// applied to an Actix Web `App`, `Scope`, or `Resource`.
+    pub fn build(self) -> Require<B, ST> {
         let inner = RequireState {
             decision: self.decision,
             unauthorized: self.unauthorized,
@@ -302,6 +300,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use actix_session::SessionExt;
+
     use super::*;
     use crate::{require::Decision, AuthSession, AuthUser};
 
@@ -359,15 +359,16 @@ mod tests {
         assert_eq!(*builder.state, TestState(42));
     }
 
-    #[tokio::test]
+    #[actix_web::test]
     async fn builder_decision_override_is_used() {
         let builder =
             RequireBuilder::<TestBackend>::new().decision(|_, _| async { Decision::Unauthorized });
         let require = builder.build();
 
-        let store = std::sync::Arc::new(tower_sessions::MemoryStore::default());
-        let session = tower_sessions::Session::new(None, store, None);
-        let auth_session = AuthSession::from_session(session, TestBackend, "axum-login.data")
+        let session = actix_web::test::TestRequest::default()
+            .to_srv_request()
+            .get_session();
+        let auth_session = AuthSession::from_session(session, TestBackend, "actix-login.data")
             .await
             .unwrap();
 

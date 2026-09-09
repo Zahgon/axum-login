@@ -1,5 +1,24 @@
 # Unreleased
 
+- **Breaking:** Migrate from `axum` to `actix-web`. The crate is now published
+  as `actix-login`; sessions are provided by `actix-session` instead of
+  `tower-sessions`, and the middleware is an Actix Web `Transform` rather than
+  a `tower` `Layer`.
+  - `AuthManagerLayerBuilder::new` now takes a `SessionMiddleware` and the
+    resulting layer bundles it, so the session is always established before the
+    auth session is derived from it.
+  - `AuthSession` is an `actix_web::FromRequest` extractor and is bound to the
+    worker thread handling the request, so it is no longer `Send`/`Sync`.
+  - `require::Require` and `require::RequireBuilder` lost their request-body
+    type parameter, and `require::ResponseHandler` now takes an
+    `actix_web::HttpRequest` and returns an `actix_web::HttpResponse`.
+  - The default session data key is now `actix-login.data`.
+  - Session errors are surfaced through the new `SessionError` type.
+  - `actix-session` ships no in-process session store, so `MemoryStore` is
+    provided here in place of `tower_sessions::MemoryStore`, which the
+    examples relied on. It keeps session state server-side, so logging out
+    invalidates the session itself rather than only the browser's cookie.
+
 - Remove `mut` in AuthSession::{logout, login}. #300
 - Align macro middleware with the `Require` core and make `macros-middleware`
   depend on `require-builder`.

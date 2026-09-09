@@ -1,5 +1,5 @@
-use axum::http::header::{AUTHORIZATION, USER_AGENT};
-use axum_login::{AuthUser, AuthnBackend, UserId};
+use actix_login::{AuthUser, AuthnBackend, UserId};
+use actix_web::http::header::{AUTHORIZATION, USER_AGENT};
 use oauth2::{
     basic::{BasicClient, BasicRequestTokenError},
     url::Url,
@@ -139,11 +139,12 @@ impl AuthnBackend for Backend {
                 .await
                 .map_err(Self::Error::Sqlx)?;
 
-                // Verifying the password is blocking and potentially slow, so we'll do so via
-                // `spawn_blocking`.
+                // Verifying the password is blocking and potentially slow, so
+                // we'll do so via `spawn_blocking`.
                 task::spawn_blocking(|| {
-                    // We're using password-based authentication: this works by comparing our form
-                    // input with an argon2 password hash.
+                    // We're using password-based authentication: this works by
+                    // comparing our form input with an
+                    // argon2 password hash.
                     Ok(user.filter(|user| {
                         let Some(ref password) = user.password else {
                             return false;
@@ -171,7 +172,7 @@ impl AuthnBackend for Backend {
                 // Use access token to request user info.
                 let user_info = reqwest::Client::new()
                     .get("https://api.github.com/user")
-                    .header(USER_AGENT.as_str(), "axum-login") // See: https://docs.github.com/en/rest/overview/resources-in-the-rest-api?apiVersion=2022-11-28#user-agent-required
+                    .header(USER_AGENT.as_str(), "actix-login") // See: https://docs.github.com/en/rest/overview/resources-in-the-rest-api?apiVersion=2022-11-28#user-agent-required
                     .header(
                         AUTHORIZATION.as_str(),
                         format!("Bearer {}", token_res.access_token().secret()),
@@ -216,4 +217,4 @@ impl AuthnBackend for Backend {
 // We use a type alias for convenience.
 //
 // Note that we've supplied our concrete backend here.
-pub type AuthSession = axum_login::AuthSession<Backend>;
+pub type AuthSession = actix_login::AuthSession<Backend>;

@@ -1,13 +1,21 @@
 use std::env;
 
-use axum_login::{
+use actix_login::{
+    actix_session::{
+        config::{PersistentSession, TtlExtensionPolicy},
+        SessionMiddleware,
+    },
     require::{RedirectHandler, Require},
-    tower_sessions::{cookie::SameSite, Expiry, MemoryStore, SessionManagerLayer},
-    AuthManagerLayerBuilder,
+    AuthManagerLayerBuilder, MemoryStore,
+};
+use actix_web::{
+    cookie::{time::Duration, Key, SameSite},
+    error::{InternalError, UrlencodedError},
+    http::StatusCode,
+    web, App as ActixApp, HttpServer,
 };
 use oauth2::{basic::BasicClient, AuthUrl, ClientId, ClientSecret, TokenUrl};
 use sqlx::SqlitePool;
-use time::Duration;
 
 use crate::{
     users::{Backend, BasicClientSet},
@@ -44,36 +52,75 @@ impl App {
     }
 
     pub async fn serve(self) -> Result<(), Box<dyn std::error::Error>> {
-        // Session layer.
-        //
-        // This uses `tower-sessions` to establish a layer that will provide the session
-        // as a request extension.
-        let session_store = MemoryStore::default();
-        let session_layer = SessionManagerLayer::new(session_store)
-            .with_secure(false)
-            .with_same_site(SameSite::Lax) // Ensure we send the cookie from the OAuth redirect.
-            .with_expiry(Expiry::OnInactivity(Duration::days(1)));
+        // Generate a cryptographic key to sign the session cookie.
+        let key = Key::generate();
 
-        // Auth service.
-        //
-        // This combines the session layer with our backend to establish the auth
-        // service which will provide the auth session as a request extension.
         let backend = Backend::new(self.db, self.client);
-        let auth_layer = AuthManagerLayerBuilder::new(backend, session_layer).build();
 
-        let require_login = Require::<Backend>::builder()
-            .unauthenticated(RedirectHandler::new().login_url("/login"))
-            .build();
+        // Session store.
+        //
+        // Built outside the factory below so that every worker thread
+        // shares the same sessions.
+        let session_store = MemoryStore::default();
 
-        let app = protected::router()
-            .route_layer(require_login)
-            .merge(auth::router())
-            .merge(oauth::router())
-            .layer(auth_layer);
+        HttpServer::new(move || {
+            // Session middleware.
+            //
+            // This uses `actix-session` to establish middleware that will
+            // provide the session as a request extension.
+            let session_middleware = SessionMiddleware::builder(session_store.clone(), key.clone())
+                .cookie_secure(false)
+                // Ensure we send the cookie from the OAuth redirect.
+                .cookie_same_site(SameSite::Lax)
+                .session_lifecycle(
+                    PersistentSession::default()
+                        .session_ttl(Duration::days(1))
+                        .session_ttl_extension_policy(TtlExtensionPolicy::OnStateChanges),
+                )
+                .build();
 
-        let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-        axum::serve(listener, app.into_make_service()).await?;
+            // Auth service.
+            //
+            // This combines the session middleware with our backend to
+            // establish the auth service which will provide the auth session as
+            // a request extension.
+            let auth_layer =
+                AuthManagerLayerBuilder::new(backend.clone(), session_middleware).build();
+
+            let require_login = Require::<Backend>::builder()
+                .unauthenticated(RedirectHandler::new().login_url("/login"))
+                .build();
+
+            ActixApp::new()
+                .app_data(form_config())
+                .wrap(auth_layer)
+                .configure(auth::configure)
+                .configure(oauth::configure)
+                .service(protected::resource().wrap(require_login))
+        })
+        .bind(("0.0.0.0", 3000))?
+        .run()
+        .await?;
 
         Ok(())
     }
+}
+
+/// Configuration for the `Form` extractor, keeping axum's rejection statuses.
+///
+/// Axum answered a form body it could not deserialize with 422 Unprocessable
+/// Entity; actix-web answers 400 Bad Request. Map the body-level rejections
+/// back so the wire contract is unchanged. The content-type, length and size
+/// rejections already agree on both sides and keep their actix-web statuses.
+fn form_config() -> web::FormConfig {
+    web::FormConfig::default().error_handler(|err, _| {
+        let status = match err {
+            UrlencodedError::Overflow { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+            UrlencodedError::UnknownLength => StatusCode::LENGTH_REQUIRED,
+            UrlencodedError::ContentType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            _ => StatusCode::UNPROCESSABLE_ENTITY,
+        };
+
+        InternalError::new(err, status).into()
+    })
 }

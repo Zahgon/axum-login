@@ -1,12 +1,6 @@
+use actix_login::actix_session::Session;
+use actix_web::{http::header, web, HttpResponse, Responder};
 use askama::Template;
-use axum::{
-    extract::Query,
-    http::StatusCode,
-    response::{Html, IntoResponse, Redirect},
-    routing::{get, post},
-    Form, Router,
-};
-use axum_login::tower_sessions::Session;
 use serde::Deserialize;
 
 use crate::{users::AuthSession, web::oauth::CSRF_STATE_KEY};
@@ -27,11 +21,30 @@ pub struct NextUrl {
     next: Option<String>,
 }
 
-pub fn router() -> Router<()> {
-    Router::new()
-        .route("/login", post(self::post::login))
-        .route("/login", get(self::get::login))
-        .route("/logout", get(self::get::logout))
+pub fn configure(cfg: &mut web::ServiceConfig) {
+    cfg.service(
+        web::resource("/login")
+            .route(web::post().to(self::post::login))
+            .route(web::get().to(self::get::login))
+            .route(web::head().to(self::get::login)),
+    )
+    .service(
+        web::resource("/logout")
+            .route(web::get().to(self::get::logout))
+            .route(web::head().to(self::get::logout)),
+    );
+}
+
+pub(super) fn html(body: String) -> HttpResponse {
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(body)
+}
+
+pub(super) fn redirect_to(location: &str) -> HttpResponse {
+    HttpResponse::SeeOther()
+        .insert_header((header::LOCATION, location.to_owned()))
+        .finish()
 }
 
 mod post {
@@ -40,42 +53,40 @@ mod post {
     pub async fn login(
         auth_session: AuthSession,
         session: Session,
-        Form(NextUrl { next }): Form<NextUrl>,
-    ) -> impl IntoResponse {
+        next: web::Form<NextUrl>,
+    ) -> impl Responder {
         let (auth_url, csrf_state) = auth_session.backend().authorize_url();
 
         session
             .insert(CSRF_STATE_KEY, csrf_state.secret())
-            .await
             .expect("Serialization should not fail.");
 
         session
-            .insert(NEXT_URL_KEY, next)
-            .await
+            .insert(NEXT_URL_KEY, next.into_inner().next)
             .expect("Serialization should not fail.");
 
-        Redirect::to(auth_url.as_str()).into_response()
+        redirect_to(auth_url.as_str())
     }
 }
 
 mod get {
     use super::*;
 
-    pub async fn login(Query(NextUrl { next }): Query<NextUrl>) -> Html<String> {
-        Html(
+    pub async fn login(next: web::Query<NextUrl>) -> impl Responder {
+        html(
             LoginTemplate {
                 message: None,
-                next,
+                next: next.into_inner().next,
             }
             .render()
             .unwrap(),
         )
     }
 
-    pub async fn logout(auth_session: AuthSession) -> impl IntoResponse {
+    pub async fn logout(auth_session: AuthSession) -> impl Responder {
         match auth_session.logout().await {
-            Ok(_) => Redirect::to("/login").into_response(),
-            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            Ok(_) => redirect_to("/login"),
+            Err(_) => HttpResponse::InternalServerError().finish(),
         }
     }
 }

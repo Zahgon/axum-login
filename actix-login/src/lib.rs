@@ -1,13 +1,14 @@
 //! # Overview
 //!
 //! This crate provides user identification, authentication, and authorization
-//! as a `tower` middleware for `axum`.
+//! as middleware for `actix-web`.
 //!
 //! It offers:
 //!
 //! - **User Identification, Authentication, and Authorization**: Leverage
 //!   [`AuthSession`] to easily manage authentication and authorization. This is
-//!   also an extractor, so it can be used directly in your `axum` handlers.
+//!   also an extractor, so it can be used directly in your `actix-web`
+//!   handlers.
 //! - **Support for Arbitrary Users and Backends**: Applications implement a
 //!   couple of traits, [`AuthUser`] and [`AuthnBackend`], allowing for any user
 //!   type and any user management backend. Your database? Yep. LDAP? Sure. An
@@ -21,8 +22,8 @@
 //!   `require-builder`). The builder is the long-term primary surface; macros
 //!   are convenience wrappers over the same behavior. Or bring your own by
 //!   using [`AuthSession`] directly with
-//!   [`from_fn`](axum::middleware::from_fn).
-//! - **Rock-solid Session Management**: Uses [`tower-sessions`](tower_sessions)
+//!   [`from_fn`](actix_web::middleware::from_fn).
+//! - **Rock-solid Session Management**: Uses [`actix-session`](actix_session)
 //!   for high-performing and ergonomic session management. *Look ma, no
 //!   deadlocks!*
 //!
@@ -36,7 +37,7 @@
 //! ```rust
 //! use std::collections::HashMap;
 //!
-//! use axum_login::{AuthUser, AuthnBackend, UserId};
+//! use actix_login::{AuthUser, AuthnBackend, UserId};
 //!
 //! #[derive(Debug, Clone)]
 //! struct User {
@@ -107,7 +108,7 @@
 //!
 //! ## Writing handlers
 //!
-//! With the traits implemented, we can write `axum` handlers, leveraging
+//! With the traits implemented, we can write `actix-web` handlers, leveraging
 //! [`AuthSession`] to manage authentication and authorization workflows.
 //! Because `AuthSession` is an extractor, we can use it directly in our
 //! handlers.
@@ -115,7 +116,7 @@
 //! ```rust
 //! # use std::collections::HashMap;
 //! #
-//! # use axum_login::{AuthUser, AuthnBackend, UserId};
+//! # use actix_login::{AuthUser, AuthnBackend, UserId};
 //! #
 //! # #[derive(Debug, Clone)]
 //! # struct User {
@@ -140,7 +141,7 @@
 //! #     users: HashMap<i64, User>,
 //! # }
 //! #
-//! # #[derive(Clone)]
+//! # #[derive(Clone, serde::Deserialize)]
 //! # struct Credentials {
 //! #     user_id: i64,
 //! # }
@@ -164,29 +165,24 @@
 //! #         Ok(self.users.get(user_id).cloned())
 //! #     }
 //! # }
-//! use axum::{
-//!     http::StatusCode,
-//!     response::{IntoResponse, Redirect},
-//!     Form,
-//! };
+//! use actix_web::{http::header, web, HttpResponse};
 //!
-//! type AuthSession = axum_login::AuthSession<Backend>;
+//! type AuthSession = actix_login::AuthSession<Backend>;
 //!
-//! async fn login(
-//!     mut auth_session: AuthSession,
-//!     Form(creds): Form<Credentials>,
-//! ) -> impl IntoResponse {
-//!     let user = match auth_session.authenticate(creds.clone()).await {
+//! async fn login(auth_session: AuthSession, creds: web::Form<Credentials>) -> HttpResponse {
+//!     let user = match auth_session.authenticate(creds.into_inner()).await {
 //!         Ok(Some(user)) => user,
-//!         Ok(None) => return StatusCode::UNAUTHORIZED.into_response(),
-//!         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+//!         Ok(None) => return HttpResponse::Unauthorized().finish(),
+//!         Err(_) => return HttpResponse::InternalServerError().finish(),
 //!     };
 //!
 //!     if auth_session.login(&user).await.is_err() {
-//!         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+//!         return HttpResponse::InternalServerError().finish();
 //!     }
 //!
-//!     Redirect::to("/protected").into_response()
+//!     HttpResponse::Found()
+//!         .insert_header((header::LOCATION, "/protected"))
+//!         .finish()
 //! }
 //! # fn main() {}
 //! ```
@@ -205,7 +201,7 @@
 //! ```rust
 //! # use std::collections::HashMap;
 //! #
-//! # use axum_login::{AuthUser, AuthnBackend, UserId};
+//! # use actix_login::{AuthUser, AuthnBackend, UserId};
 //! #
 //! # #[derive(Debug, Clone)]
 //! # struct User {
@@ -255,18 +251,17 @@
 //! #     }
 //! # }
 //! # #[cfg(feature = "macros-middleware")]
-//! use axum::{routing::get, Router};
+//! use actix_login::login_required;
 //! # #[cfg(feature = "macros-middleware")]
-//! use axum_login::login_required;
+//! use actix_web::{web, HttpResponse, Scope};
 //!
 //! # #[cfg(feature = "macros-middleware")]
-//! fn protected_routes() -> Router {
-//!     Router::new()
-//!         .route(
-//!             "/protected",
-//!             get(|| async { "Gotta be logged in to see me!" }),
-//!         )
-//!         .route_layer(login_required!(Backend, login_url = "/login"))
+//! fn protected_routes() -> Scope {
+//!     web::scope("").service(
+//!         web::resource("/protected")
+//!             .wrap(login_required!(Backend, login_url = "/login"))
+//!             .route(web::get().to(|| async { "Gotta be logged in to see me!" })),
+//!     )
 //! }
 //! # fn main() {}
 //! ```
@@ -281,7 +276,7 @@
 //! ## Builder-based middleware
 //!
 //! ```rust,no_run
-//! use axum_login::{
+//! use actix_login::{
 //!     require::{RedirectHandler, Require},
 //!     AuthUser, AuthnBackend, UserId,
 //! };
@@ -348,14 +343,17 @@
 //!
 //! ## Setting up an auth service
 //!
-//! In order to make use of this within our `axum` application, we establish a
-//! `tower` service which provides a middleware that attaches `AuthSession` as a
-//! request extension.
+//! In order to make use of this within our `actix-web` application, we
+//! establish a middleware which attaches `AuthSession` as a request extension.
+//! The middleware bundles the [`SessionMiddleware`] it is built with, so the
+//! session is always established first.
+//!
+//! [`SessionMiddleware`]: actix_session::SessionMiddleware
 //!
 //! ```rust,no_run
 //! # use std::collections::HashMap;
 //! #
-//! # use axum_login::{AuthUser, AuthnBackend, UserId};
+//! # use actix_login::{AuthUser, AuthnBackend, UserId};
 //! #
 //! # #[derive(Debug, Clone)]
 //! # struct User {
@@ -405,38 +403,42 @@
 //! #     }
 //! # }
 //! # #[cfg(feature = "macros-middleware")]
-//! use axum::{
-//!     routing::{get, post},
-//!     Router,
-//! };
+//! use actix_login::{login_required, AuthManagerLayerBuilder};
 //! # #[cfg(feature = "macros-middleware")]
-//! use axum_login::{
-//!     login_required,
-//!     tower_sessions::{MemoryStore, SessionManagerLayer},
-//!     AuthManagerLayerBuilder,
-//! };
+//! use actix_session::{storage::CookieSessionStore, SessionMiddleware};
+//! # #[cfg(feature = "macros-middleware")]
+//! use actix_web::{cookie::Key, web, App, HttpResponse, HttpServer};
 //!
 //! # #[cfg(feature = "macros-middleware")]
-//! async fn run() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Session layer.
-//!     let session_store = MemoryStore::default();
-//!     let session_layer = SessionManagerLayer::new(session_store);
+//! async fn run() -> std::io::Result<()> {
+//!     // Signing key for the session cookie.
+//!     let key = Key::generate();
 //!
-//!     // Auth service.
-//!     let backend = Backend::default();
-//!     let auth_layer = AuthManagerLayerBuilder::new(backend, session_layer).build();
+//!     HttpServer::new(move || {
+//!         // Session middleware.
+//!         let session_middleware =
+//!             SessionMiddleware::new(CookieSessionStore::default(), key.clone());
 //!
-//!     let app = Router::new()
-//!         .route("/protected", get::<(), _, _>(todo!()))
-//!         .route_layer(login_required!(Backend, login_url = "/login"))
-//!         .route("/login", post::<(), _, _>(todo!()))
-//!         .route("/login", get::<(), _, _>(todo!()))
-//!         .layer(auth_layer);
+//!         // Auth service.
+//!         let backend = Backend::default();
+//!         let auth_layer = AuthManagerLayerBuilder::new(backend, session_middleware).build();
 //!
-//!     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-//!     axum::serve(listener, app.into_make_service()).await?;
-//!
-//!     Ok(())
+//!         App::new()
+//!             .wrap(auth_layer)
+//!             .service(
+//!                 web::resource("/protected")
+//!                     .wrap(login_required!(Backend, login_url = "/login"))
+//!                     .route(web::get().to(HttpResponse::Ok)),
+//!             )
+//!             .service(
+//!                 web::resource("/login")
+//!                     .route(web::post().to(HttpResponse::Ok))
+//!                     .route(web::get().to(HttpResponse::Ok)),
+//!             )
+//!     })
+//!     .bind(("0.0.0.0", 3000))?
+//!     .run()
+//!     .await
 //! }
 //! # fn main() {}
 //! ```
@@ -448,7 +450,7 @@
 //! are incomplete and as such it's recommended to review a comprehensive
 //! implementation as well.
 //!
-//! A complete example can be found in [`examples/sqlite.rs`](https://github.com/maxcountryman/axum-login/blob/main/examples/sqlite).
+//! A complete example can be found in [`examples/sqlite.rs`](https://github.com/maxcountryman/actix-login/blob/main/examples/sqlite).
 #![warn(
     clippy::all,
     nonstandard_style,
@@ -458,18 +460,20 @@
 )]
 #![forbid(unsafe_code)]
 
-pub use axum;
+pub use actix_session;
+pub use actix_web;
 pub use backend::{AuthUser, AuthnBackend, AuthzBackend, UserId};
 #[doc(hidden)]
 pub use service::{AuthManager, AuthManagerLayer, AuthManagerLayerBuilder};
-pub use session::{AuthSession, Error};
-pub use tower_sessions;
+pub use session::{AuthSession, Error, SessionError};
+pub use session_store::MemoryStore;
 pub use tracing;
 
 mod backend;
 mod extract;
 mod service;
 mod session;
+mod session_store;
 
 #[cfg(feature = "require-builder")]
 pub mod require;

@@ -1,11 +1,5 @@
+use actix_web::{http::header, web, HttpResponse, Responder};
 use askama::Template;
-use axum::{
-    extract::Query,
-    http::StatusCode,
-    response::{Html, IntoResponse, Redirect},
-    routing::{get, post},
-    Form, Router,
-};
 use serde::Deserialize;
 
 use crate::users::{AuthSession, Credentials};
@@ -24,24 +18,42 @@ pub struct NextUrl {
     next: Option<String>,
 }
 
-pub fn router() -> Router<()> {
-    Router::new()
-        .route("/login", post(self::post::login))
-        .route("/login", get(self::get::login))
-        .route("/logout", get(self::get::logout))
+pub fn configure(cfg: &mut web::ServiceConfig) {
+    cfg.service(
+        web::resource("/login")
+            .route(web::post().to(self::post::login))
+            .route(web::get().to(self::get::login))
+            .route(web::head().to(self::get::login)),
+    )
+    .service(
+        web::resource("/logout")
+            .route(web::get().to(self::get::logout))
+            .route(web::head().to(self::get::logout)),
+    );
+}
+
+fn html(body: String) -> HttpResponse {
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(body)
+}
+
+fn redirect_to(location: &str) -> HttpResponse {
+    HttpResponse::SeeOther()
+        .insert_header((header::LOCATION, location.to_owned()))
+        .finish()
 }
 
 mod post {
     use super::*;
 
-    pub async fn login(
-        auth_session: AuthSession,
-        Form(creds): Form<Credentials>,
-    ) -> impl IntoResponse {
+    pub async fn login(auth_session: AuthSession, creds: web::Form<Credentials>) -> impl Responder {
+        let creds = creds.into_inner();
+
         let user = match auth_session.authenticate(creds.clone()).await {
             Ok(Some(user)) => user,
             Ok(None) => {
-                return Html(
+                return html(
                     LoginTemplate {
                         message: Some("Invalid credentials.".to_string()),
                         next: creds.next,
@@ -49,19 +61,18 @@ mod post {
                     .render()
                     .unwrap(),
                 )
-                .into_response()
             }
-            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            Err(_) => return HttpResponse::InternalServerError().finish(),
         };
 
         if auth_session.login(&user).await.is_err() {
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            return HttpResponse::InternalServerError().finish();
         }
 
         if let Some(ref next) = creds.next {
-            Redirect::to(next).into_response()
+            redirect_to(next)
         } else {
-            Redirect::to("/").into_response()
+            redirect_to("/")
         }
     }
 }
@@ -69,21 +80,21 @@ mod post {
 mod get {
     use super::*;
 
-    pub async fn login(Query(NextUrl { next }): Query<NextUrl>) -> Html<String> {
-        Html(
+    pub async fn login(next: web::Query<NextUrl>) -> impl Responder {
+        html(
             LoginTemplate {
                 message: None,
-                next,
+                next: next.into_inner().next,
             }
             .render()
             .unwrap(),
         )
     }
 
-    pub async fn logout(auth_session: AuthSession) -> impl IntoResponse {
+    pub async fn logout(auth_session: AuthSession) -> impl Responder {
         match auth_session.logout().await {
-            Ok(_) => Redirect::to("/login").into_response(),
-            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            Ok(_) => redirect_to("/login"),
+            Err(_) => HttpResponse::InternalServerError().finish(),
         }
     }
 }

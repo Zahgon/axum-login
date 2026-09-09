@@ -1,0 +1,50 @@
+[package]
+name = "actix-login"
+version = "0.18.0"
+description = "🪪 User identification, authentication, and authorization for Actix Web."
+edition = "2021"
+homepage = "https://github.com/maxcountryman/actix-login"
+license = "MIT"
+keywords = ["authentication", "authorization", "login", "actix", "sessions"]
+categories = [
+    "web-programming::http-server",
+    "web-programming",
+    "database",
+    "asynchronous",
+]
+repository = "https://github.com/maxcountryman/actix-login"
+documentation = "https://docs.rs/actix-login"
+readme = "../README.md"
+
+[features]
+require-builder = []
+macros-middleware = ["require-builder"]
+default = ["macros-middleware"]
+
+[dependencies]
+actix-session = "0.11.0"
+anyhow = "1.0"
+actix-web = { version = "4.15.0", default-features = false, features = [
+    "cookies",
+] }
+subtle = "2.5.0"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2.0.0"
+tracing = { version = "0.1.40", features = ["log"] }
+urlencoding = "2.1.3"
+form_urlencoded = "1.2.1"
+
+[dev-dependencies]
+actix-session = { version = "0.11.0", features = ["cookie-session"] }
+actix-web = "4.15.0"
+criterion = { version = "0.5", features = ["async_tokio"] }
+mockall = "0.13"
+reqwest = { version = "0.12", features = ["cookies"] }
+serial_test = "3.0.0"
+time = "0.3.36"
+tokio = { version = "1.32.0", features = ["full"] }
+
+[[bench]]
+name = "middleware_comparison"
+harness = false
+required-features = ["require-builder", "macros-middleware"]

@@ -1,6 +1,6 @@
 # AGENTS
 
-This repo is a workspace with the library at `axum-login/` and examples under
+This repo is a workspace with the library at `actix-login/` and examples under
 `examples/*`.
 
 ## Expectations

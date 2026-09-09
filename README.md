@@ -1,36 +1,36 @@
 <h1 align="center">
-    axum-login
+    actix-login
 </h1>
 
 <p align="center">
-    🪪 User identification, authentication, and authorization for Axum.
+    🪪 User identification, authentication, and authorization for Actix Web.
 </p>
 
 <div align="center">
-    <a href="https://crates.io/crates/axum-login">
-        <img src="https://img.shields.io/crates/v/axum-login.svg" />
+    <a href="https://crates.io/crates/actix-login">
+        <img src="https://img.shields.io/crates/v/actix-login.svg" />
     </a>
-    <a href="https://docs.rs/axum-login">
-        <img src="https://docs.rs/axum-login/badge.svg" />
+    <a href="https://docs.rs/actix-login">
+        <img src="https://docs.rs/actix-login/badge.svg" />
     </a>
-    <a href="https://github.com/maxcountryman/axum-login/actions/workflows/rust.yml">
-        <img src="https://github.com/maxcountryman/axum-login/actions/workflows/rust.yml/badge.svg" />
+    <a href="https://github.com/maxcountryman/actix-login/actions/workflows/rust.yml">
+        <img src="https://github.com/maxcountryman/actix-login/actions/workflows/rust.yml/badge.svg" />
     </a>
-    <a href="https://codecov.io/gh/maxcountryman/axum-login" > 
-        <img src="https://codecov.io/gh/maxcountryman/axum-login/graph/badge.svg?token=4WKTLPEGJC"/> 
+    <a href="https://codecov.io/gh/maxcountryman/actix-login" > 
+        <img src="https://codecov.io/gh/maxcountryman/actix-login/graph/badge.svg?token=4WKTLPEGJC"/> 
     </a>
 </div>
 
 ## 🎨 Overview
 
 This crate provides user identification, authentication, and authorization
-as a `tower` middleware for `axum`.
+as middleware for `actix-web`.
 
 It offers:
 
 - **User Identification, Authentication, and Authorization**: Leverage
   `AuthSession` to easily manage authentication and authorization. This is
-  also an extractor, so it can be used directly in your `axum` handlers.
+  also an extractor, so it can be used directly in your `actix-web` handlers.
 - **Support for Arbitrary Users and Backends**: Applications implement a
   couple of traits, `AuthUser` and `AuthnBackend`, allowing for any user
   type and any user management backend. Your database? Yep. LDAP? Sure. An
@@ -43,7 +43,7 @@ It offers:
   macros, and via the `require` builder (`require-builder` feature). The
   builder is the long-term primary surface; macros are convenience wrappers
   over the same behavior.
-- **Rock-solid Session Management**: Uses [`tower-sessions`](https://github.com/maxcountryman/tower-sessions)
+- **Rock-solid Session Management**: Uses [`actix-session`](https://github.com/actix/actix-extras/tree/master/actix-session)
   for high-performing and ergonomic session management. _Look ma, no deadlocks!_
 
 ## 📦 Install
@@ -52,12 +52,12 @@ To use the crate in your project, add the following to your `Cargo.toml` file:
 
 ```toml
 [dependencies]
-axum-login = "0.18.0"
+actix-login = "0.18.0"
 ```
 
 ## 🤸 Usage
 
-We recommend reviewing our [`sqlite` example][sqlite-example]. There is also a [template for `cargo-generate` using postgres](https://gitlab.com/maxhambraeus/axum-login-postgres-template).
+We recommend reviewing our [`sqlite` example][sqlite-example].
 
 > [!NOTE]
 > See the [crate documentation][docs] for usage information.
@@ -65,8 +65,8 @@ We recommend reviewing our [`sqlite` example][sqlite-example]. There is also a [
 ### Builder quick start
 
 ```rust
-use axum_login::require::{RedirectHandler, Require};
-use axum_login::{AuthUser, AuthnBackend, UserId};
+use actix_login::require::{RedirectHandler, Require};
+use actix_login::{AuthUser, AuthnBackend, UserId};
 
 #[derive(Clone, Debug)]
 struct User;
@@ -114,6 +114,11 @@ let require = Require::<Backend>::builder()
 You can customize access logic with `.decision(...)`, which receives an
 `AuthSession` plus `Arc<state>` when you build with shared state.
 
+Apply the result with `App::wrap`, `Scope::wrap`, or `Resource::wrap`. The
+auth service itself is built with `AuthManagerLayerBuilder`, which bundles the
+`SessionMiddleware` it is given so that sessions are always established before
+the auth session is derived from them.
+
 ## ✅ Behavior Contract
 
 The middleware surfaces follow the same contract:
@@ -132,7 +137,7 @@ Example (builder only, no macros):
 
 ```toml
 [dependencies]
-axum-login = { version = "0.18.0", default-features = false, features = ["require-builder"] }
+actix-login = { version = "0.18.0", default-features = false, features = ["require-builder"] }
 ```
 
 ## 🦺 Safety
@@ -141,12 +146,12 @@ This crate uses `#![forbid(unsafe_code)]` to ensure everything is implemented in
 
 ## 🛟 Getting Help
 
-We've put together a number of [examples][examples] to help get you started. You're also welcome to [open a discussion](https://github.com/maxcountryman/axum-login/discussions/new?category=q-a) and ask additional questions you might have.
+We've put together a number of [examples][examples] to help get you started. You're also welcome to [open a discussion](https://github.com/maxcountryman/actix-login/discussions/new?category=q-a) and ask additional questions you might have.
 
 ## 👯 Contributing
 
 We appreciate all kinds of contributions, thank you!
 
-[sqlite-example]: https://github.com/maxcountryman/axum-login/tree/main/examples/sqlite
-[examples]: https://github.com/maxcountryman/axum-login/tree/main/examples
-[docs]: https://docs.rs/axum-login
+[sqlite-example]: https://github.com/maxcountryman/actix-login/tree/main/examples/sqlite
+[examples]: https://github.com/maxcountryman/actix-login/tree/main/examples
+[docs]: https://docs.rs/actix-login

@@ -21,6 +21,10 @@ pub enum Decision {
 /// This trait takes an owned [`AuthSession`] to keep async usage ergonomic.
 /// Implementations should be cheap to share across requests, typically by
 /// storing any internal data behind `Arc`.
+///
+/// Predicates are shared across requests, so they must be `Send + Sync`. The
+/// futures they return borrow the worker-local auth session and therefore need
+/// not be.
 pub trait DecisionPredicate<B: AuthnBackend, ST = ()>: Send + Sync {
     /// Decide whether a request is allowed.
     ///
@@ -68,7 +72,7 @@ where
 impl<F, B, ST, Fut> DecisionPredicate<B, ST> for F
 where
     F: Fn(AuthSession<B>, Arc<ST>) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Decision> + Send + 'static,
+    Fut: Future<Output = Decision> + 'static,
     B: AuthnBackend + 'static,
     ST: Send + Sync + 'static,
 {
@@ -95,7 +99,7 @@ pub enum PermissionMatch {
 /// # Example
 ///
 /// ```rust,no_run
-/// use axum_login::{
+/// use actix_login::{
 ///     require::{PermissionMatch, PermissionsPredicate, Require},
 ///     AuthUser, AuthnBackend, AuthzBackend, UserId,
 /// };
@@ -236,7 +240,8 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use tower_sessions::{MemoryStore, Session};
+    use actix_session::SessionExt;
+    use actix_web::test::TestRequest;
 
     use super::*;
     use crate::{AuthSession, AuthUser};
@@ -299,9 +304,8 @@ mod tests {
     }
 
     async fn auth_session_with_user() -> AuthSession<TestBackend> {
-        let store = Arc::new(MemoryStore::default());
-        let session = Session::new(None, store, None);
-        let auth_session = AuthSession::from_session(session, TestBackend, "axum-login.data")
+        let session = TestRequest::default().to_srv_request().get_session();
+        let auth_session = AuthSession::from_session(session, TestBackend, "actix-login.data")
             .await
             .unwrap();
         auth_session.login(&TestUser).await.unwrap();
@@ -309,14 +313,13 @@ mod tests {
     }
 
     async fn auth_session_without_user() -> AuthSession<TestBackend> {
-        let store = Arc::new(MemoryStore::default());
-        let session = Session::new(None, store, None);
-        AuthSession::from_session(session, TestBackend, "axum-login.data")
+        let session = TestRequest::default().to_srv_request().get_session();
+        AuthSession::from_session(session, TestBackend, "actix-login.data")
             .await
             .unwrap()
     }
 
-    #[tokio::test]
+    #[actix_web::test]
     async fn default_access_returns_unauthenticated() {
         let predicate = DefaultAccess::<TestBackend, ()>::default();
         let auth_session = auth_session_without_user().await;
@@ -326,7 +329,7 @@ mod tests {
         assert_eq!(decision, Decision::Unauthenticated);
     }
 
-    #[tokio::test]
+    #[actix_web::test]
     async fn default_access_returns_allow() {
         let predicate = DefaultAccess::<TestBackend, ()>::default();
         let auth_session = auth_session_with_user().await;
@@ -336,7 +339,7 @@ mod tests {
         assert_eq!(decision, Decision::Allow);
     }
 
-    #[tokio::test]
+    #[actix_web::test]
     async fn permissions_predicate_denies_on_backend_error() {
         let predicate = PermissionsPredicate::<TestBackend>::new()
             .with_permissions(["admin.read"])

@@ -1,4 +1,4 @@
 [workspace]
-default-members = ["axum-login"]
+default-members = ["actix-login"]
 resolver = "2"
-members = ["axum-login", "examples/*"]
+members = ["actix-login", "examples/*"]
